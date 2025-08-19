@@ -236,3 +236,40 @@
     (asserts! (is-eq tx-sender contract-owner) error-unauthorized)
     (var-set max-liquidity-per-market max-amount)
     (ok true)))
+
+(define-public (withdraw-oracle-stake (amount uint))
+  (let ((oracle (unwrap! (map-get? oracles tx-sender) error-not-oracle))
+        (current-stake (get stake oracle))
+        (remaining-stake (- current-stake amount)))
+    
+    ;; Ensure minimum stake remains
+    (asserts! (>= remaining-stake min-stake) error-invalid-amount)
+    
+    ;; Transfer stake back to oracle
+    (as-contract (try! (stx-transfer? amount tx-sender tx-sender)))
+    
+    ;; Update oracle stake
+    (map-set oracles tx-sender
+      (merge oracle { stake: remaining-stake }))
+    
+    (ok true)))
+
+(define-map market-oracles
+  { market-id: uint, oracle: principal }
+  { added-by: principal, weight: uint })
+
+(define-map liquidity-providers
+  { market-id: uint, provider: principal, outcome: (string-ascii 50) }
+  { amount: uint, block-added: uint })
+
+(define-map user-activity
+  principal
+  {
+    markets-participated: uint,
+    total-volume: uint,
+    last-activity-block: uint,
+    positions-count: uint,
+    wins: uint,
+    losses: uint
+  })
+
