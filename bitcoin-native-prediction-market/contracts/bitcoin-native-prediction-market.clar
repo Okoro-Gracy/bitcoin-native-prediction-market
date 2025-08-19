@@ -53,3 +53,45 @@
     outcome-values: (optional (list 10 uint)), ;; For scalar markets
     metadata: (optional (string-utf8 500))
   })
+
+;; Liquidity pools for each outcome
+(define-map liquidity-pools
+  { market-id: uint, outcome: (string-ascii 50) }
+  { amount: uint })
+
+;; User positions in markets
+(define-map positions
+  { market-id: uint, user: principal, outcome: (string-ascii 50) }
+  { amount: uint, claimed: bool })
+
+;; Oracles registry
+(define-map oracles
+  principal
+  {
+    stake: uint,
+    status: (buff 1),
+    reliability-score: uint,
+    markets-resolved: uint,
+    total-disputes: uint,
+    reputation: uint,
+    registration-block: uint
+  })
+
+;; Oracle votes for market outcomes
+(define-map oracle-votes
+  { market-id: uint, oracle: principal }
+  { outcome: (string-ascii 50), confidence: uint, timestamp: uint })
+
+;; Disputes for market resolutions
+(define-map disputes
+  uint
+  {
+    disputer: principal,
+    original-outcome: (string-ascii 50),
+    proposed-outcome: (string-ascii 50),
+    evidence: (string-utf8 500),
+    stake: uint,
+    resolution-votes: (list 100 principal),
+    resolution-block: (optional uint),
+    status: (buff 1)
+  })
