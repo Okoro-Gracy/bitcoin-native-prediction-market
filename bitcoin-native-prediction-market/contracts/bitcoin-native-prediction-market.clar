@@ -492,3 +492,187 @@
     (var-set template-id-nonce (+ template-id u1))
     
     (ok template-id)))
+;; Get market template
+(define-read-only (get-market-template (template-id uint))
+  (map-get? market-templates template-id))
+
+;; Create market from template
+(define-public (create-market-from-template 
+  (template-id uint) 
+  (oracle-address principal)
+  (metadata (optional (string-utf8 500))))
+  
+  (let ((template (unwrap! (map-get? market-templates template-id) error-invalid-params))
+        (resolution-block (+ stacks-block-height (get duration-blocks template))))
+    
+    ;; [Call to create-market function would go here with template values]
+    ;; Return the new market ID
+    (ok (var-get market-id-nonce))))
+
+    ;; Referral tracking
+(define-map referrals
+  { referred-user: principal }
+  { referrer: principal, active-until: uint, fee-share-percentage: uint })
+
+;; Referrer earnings
+(define-map referrer-earnings
+  principal
+  { total-earnings: uint, withdrawn-earnings: uint })
+
+;; Set referral
+(define-public (set-referral (referrer principal))
+  (begin
+    ;; Cannot refer yourself
+    (asserts! (not (is-eq tx-sender referrer)) error-invalid-params)
+    
+    ;; Set referral with 90-day expiration (approximately)
+    (map-set referrals 
+      { referred-user: tx-sender }
+      { 
+        referrer: referrer, 
+        active-until: (+ stacks-block-height u12960), ;; ~90 days in Bitcoin blocks
+        fee-share-percentage: u50 ;; 50% share of fees
+      })
+    
+    (ok true)))
+
+;; Check if referral is active
+(define-read-only (is-referral-active (user principal))
+  (match (map-get? referrals { referred-user: user })
+    referral (< stacks-block-height (get active-until referral))
+    false))
+
+;; Get referrer for user
+(define-read-only (get-referrer (user principal))
+  (match (map-get? referrals { referred-user: user })
+    referral (some (get referrer referral))
+    none))
+
+;; Update referrer earnings (would be called during fee collection)
+(define-private (update-referrer-earnings (referrer principal) (amount uint))
+  (let ((current-earnings (default-to { total-earnings: u0, withdrawn-earnings: u0 } 
+                          (map-get? referrer-earnings referrer))))
+    (map-set referrer-earnings
+      referrer
+      { 
+        total-earnings: (+ (get total-earnings current-earnings) amount),
+        withdrawn-earnings: (get withdrawn-earnings current-earnings)
+      })))
+
+;; Withdraw referrer earnings
+(define-public (withdraw-referrer-earnings)
+  (let ((earnings (default-to { total-earnings: u0, withdrawn-earnings: u0 } 
+                  (map-get? referrer-earnings tx-sender)))
+        (available (- (get total-earnings earnings) (get withdrawn-earnings earnings))))
+    
+    ;; Check if anything to withdraw
+    (asserts! (> available u0) error-invalid-withdrawal)
+    
+    ;; Transfer earnings
+    (as-contract (try! (stx-transfer? available tx-sender tx-sender)))
+    
+    ;; Update withdrawn amount
+    (map-set referrer-earnings
+      tx-sender
+      { 
+        total-earnings: (get total-earnings earnings),
+        withdrawn-earnings: (+ (get withdrawn-earnings earnings) available)
+      })
+    
+    (ok available)))
+
+;; Get referrer earnings
+(define-read-only (get-referrer-earnings (referrer principal))
+  (let ((earnings (default-to { total-earnings: u0, withdrawn-earnings: u0 } 
+                  (map-get? referrer-earnings referrer))))
+    {
+      total: (get total-earnings earnings),
+      withdrawn: (get withdrawn-earnings earnings),
+      available: (- (get total-earnings earnings) (get withdrawn-earnings earnings))
+    }))
+
+;; Popular markets list (manually curated)
+(define-map popular-markets
+  uint ;; ranking position
+  uint ;; market-id
+)
+
+;; Set popular market (admin only)
+(define-public (set-popular-market (position uint) (market-id uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) error-unauthorized)
+    (map-set popular-markets position market-id)
+    (ok true)))
+
+
+;; Get popular markets
+(define-read-only (get-popular-markets)
+  (list
+    (map-get? popular-markets u1)
+    (map-get? popular-markets u2)
+    (map-get? popular-markets u3)
+    (map-get? popular-markets u4)
+    (map-get? popular-markets u5)
+  ))
+
+;; Market search index by keyword
+(define-map keyword-markets
+  (string-ascii 20)
+  (list 50 uint))
+
+;; AMM constants
+(define-constant amm-fee-percentage u5) ;; 0.5% fee
+(define-constant amm-initial-liquidity u1000000) ;; 1000 STX minimum initial liquidity
+
+;; AMM pool details
+(define-map amm-pools
+  uint  ;; market-id
+  {
+    constant-product: uint,
+    yes-pool: uint,
+    no-pool: uint,
+    lp-tokens: uint,
+    fee-collected: uint
+  })
+
+;; AMM LP token balances
+(define-map amm-lp-balances
+  { market-id: uint, provider: principal }
+  { tokens: uint })
+
+;; Initialize AMM for binary market
+(define-public (initialize-amm-pool (market-id uint) (yes-amount uint) (no-amount uint))
+  (let ((market (unwrap! (map-get? markets market-id) error-invalid-market))
+        (outcome-type (get outcome-type market))
+        (possible-outcomes (get possible-outcomes market)))
+    
+    ;; Verify this is a binary market with yes/no outcomes
+    (asserts! (and (is-eq outcome-type 0x01)
+                   (is-eq (len possible-outcomes) u2)) error-invalid-market)
+    
+    ;; Ensure minimum liquidity
+    (asserts! (and (>= yes-amount amm-initial-liquidity)
+                   (>= no-amount amm-initial-liquidity)) error-invalid-amount)
+    
+    ;; Calculate constant product
+    (let ((constant-product (* yes-amount no-amount))
+          (lp-tokens (sqrti constant-product)))
+      
+      ;; Transfer STX to contract
+      (try! (stx-transfer? (+ yes-amount no-amount) tx-sender (as-contract tx-sender)))
+      
+      ;; Set initial AMM state
+      (map-set amm-pools market-id {
+        constant-product: constant-product,
+        yes-pool: yes-amount,
+        no-pool: no-amount,
+        lp-tokens: lp-tokens,
+        fee-collected: u0
+      })
+      
+      ;; Assign LP tokens to provider
+      (map-set amm-lp-balances 
+        { market-id: market-id, provider: tx-sender }
+        { tokens: lp-tokens })
+      
+      (ok lp-tokens))))
